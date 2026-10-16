@@ -184,6 +184,7 @@ def build_student(
     device: torch.device,
     strict_load: bool = True,
     dataset: str = "synapse",
+    base_ckpt: Optional[str] = None,
 ) -> nn.Module:
     if iad_root not in sys.path:
         sys.path.insert(0, iad_root)
@@ -194,10 +195,21 @@ def build_student(
     from segment_anything_Stu import sam_model_registry as sam_model_registry_stu
     from sam_lora_image_encoder_stu import LoRA_Sam as LoRA_Sam_Stu
 
+    resolved_base = None
+    if not student_ckpt and ds in ("acdc", "polyp"):
+        base_cands = [
+            base_ckpt,
+            os.path.join(iad_root, "data", "weights", "sam_vit_l_0b3195.pth"),
+            os.path.join(REPO_ROOT, "data", "weights", "sam_vit_l_0b3195.pth"),
+            os.path.join(iad_root, "sam_vit_l_0b3195.pth"),
+            os.path.join(REPO_ROOT, "sam_vit_l_0b3195.pth"),
+        ]
+        resolved_base = resolve_existing_path(base_ckpt, base_cands)
+
     sam_stu, _ = sam_model_registry_stu["vit_l"](
         image_size=spec["image_size"],
         num_classes=spec["sam_num_classes"],
-        checkpoint=None,
+        checkpoint=resolved_base,
         pixel_mean=[0, 0, 0],
         pixel_std=[1, 1, 1],
     )

@@ -84,14 +84,25 @@ class KISLoss(nn.Module):
         dice_weight: float = 0.9,
         sgs_weight: float = 0.8,
         kis_weight: float = 0.2,
+        normalize_logits: bool = False,
+        eps: float = 1e-3,
     ):
         super().__init__()
         self.num_classes = int(num_classes)
         self.dice_weight = float(dice_weight)
         self.sgs_weight = float(sgs_weight)
         self.kis_weight = float(kis_weight)
+        self.normalize_logits = bool(normalize_logits)
+        self.eps = float(eps)
         self.ce_loss = nn.CrossEntropyLoss()
         self.dice_loss = DiceLoss(n_classes=max(2, self.num_classes))
+
+    def _standardize(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.normalize_logits:
+            return x
+        if x.shape[1] == 1:
+            return (x - x.mean(dim=(2, 3), keepdim=True)) / (x.std(dim=(2, 3), keepdim=True) + self.eps)
+        return (x - x.mean(dim=1, keepdim=True)) / (x.std(dim=1, keepdim=True) + self.eps)
 
     def forward(
         self,
@@ -108,22 +119,25 @@ class KISLoss(nn.Module):
         if tea_out.shape[-2:] != stu_out.shape[-2:]:
             tea_out = F.interpolate(tea_out, size=stu_out.shape[-2:], mode="bilinear", align_corners=False)
 
+        stu_kd = self._standardize(stu_out)
+        tea_kd = self._standardize(tea_out)
+
         if self.num_classes == 1:
             mask_f = labels_long.float().unsqueeze(1)
             loss_ce = F.binary_cross_entropy_with_logits(stu_out, mask_f)
             loss_sgs = structure_loss(stu_out, mask_f)
             loss_dice = (loss_sgs - loss_ce).detach()
-            loss_l2 = F.mse_loss(stu_out, tea_out)
-            tea_proto = comp_class_pro(labels_long, tea_out, num_classes=2)
-            stu_proto = comp_class_pro(labels_long, stu_out, num_classes=2)
+            loss_l2 = F.mse_loss(stu_kd, tea_kd)
+            tea_proto = comp_class_pro(labels_long, tea_kd, num_classes=2)
+            stu_proto = comp_class_pro(labels_long, stu_kd, num_classes=2)
             proloss_l2 = F.mse_loss(stu_proto, tea_proto)
         else:
             loss_ce = self.ce_loss(stu_out, labels_long)
             loss_dice = self.dice_loss(stu_out, labels_long, softmax=True)
             loss_sgs = (1.0 - self.dice_weight) * loss_ce + self.dice_weight * loss_dice
-            loss_l2 = F.mse_loss(stu_out, tea_out)
-            tea_proto = comp_class_pro(labels_long, tea_out, num_classes=self.num_classes)
-            stu_proto = comp_class_pro(labels_long, stu_out, num_classes=self.num_classes)
+            loss_l2 = F.mse_loss(stu_kd, tea_kd)
+            tea_proto = comp_class_pro(labels_long, tea_kd, num_classes=self.num_classes)
+            stu_proto = comp_class_pro(labels_long, stu_kd, num_classes=self.num_classes)
             mse_proto = F.mse_loss(stu_proto, tea_proto, reduction="none")
             proloss_l2 = (mse_proto * cpd_class_weights(self.num_classes, outputs_student.device)).mean()
 

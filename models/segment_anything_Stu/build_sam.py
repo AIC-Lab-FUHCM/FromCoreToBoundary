@@ -188,17 +188,15 @@ def _build_sam(
     sam.train()
     if checkpoint is not None:
         with open(checkpoint, "rb") as f:
-            state_dict = torch.load(f)
+            state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
-            # 过滤掉 except_keys 中的参数
             except_keys = ['mask_tokens', 'output_hypernetworks_mlps', 'iou_prediction_head']
             filtered_state_dict = {
                 k: v for k, v in state_dict.items()
                 if not any(ex_key in k for ex_key in except_keys)
             }
 
-            load_result = sam.load_state_dict(filtered_state_dict, strict=False)
-            print('loading mask_decoder pretrain!!!')
+            sam.load_state_dict(filtered_state_dict, strict=False)
 
             # loaded_keys = set(state_dict.keys()) - set(load_result.unexpected_keys)
             # print("Successfully Loaded Keys:")

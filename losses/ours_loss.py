@@ -19,6 +19,7 @@ class OursLoss(nn.Module):
         feat_dim: int = 9,
         cache_momentum: float = 0.9,
         feature_space: str = "centered",
+        error_reduction: str = "class_balanced",
         eps: float = 1e-8,
     ):
         super().__init__()
@@ -32,6 +33,7 @@ class OursLoss(nn.Module):
         self.feat_dim = int(feat_dim)
         self.cache_momentum = float(cache_momentum)
         self.feature_space = str(feature_space).strip().lower()
+        self.error_reduction = str(error_reduction).strip().lower()
         self.eps = float(eps)
 
         self.register_buffer("prototype_buffer", torch.zeros((self.num_classes, self.feat_dim), dtype=torch.float32), persistent=True)
@@ -157,6 +159,8 @@ class OursLoss(nn.Module):
         loss_b = pair_loss_sum / float(boundary_pair_count) if boundary_pair_count > 0 else 0.0 * fplus_work.sum()
 
         active_error_losses: List[torch.Tensor] = []
+        total_pixel_e_loss = torch.tensor(0.0, device=device, dtype=calc_dtype)
+        total_sampled_error = 0
         err_flat_indices = torch.where((y_gt != pred_labels).view(-1))[0]
         if len(err_flat_indices) > 0:
             y_err_all = y_gt.view(-1)[err_flat_indices]
@@ -181,9 +185,18 @@ class OursLoss(nn.Module):
                 flat_sel = err_flat_indices[idx_sel]
                 logits_sel = fplus_flat[flat_sel]
                 target_sel = torch.full((len(flat_sel),), c, dtype=torch.long, device=device)
-                active_error_losses.append(F.cross_entropy(logits_sel, target_sel))
+                ell_c = F.cross_entropy(logits_sel, target_sel, reduction="none")
+                active_error_losses.append(ell_c.mean())
+                total_pixel_e_loss = total_pixel_e_loss + ell_c.sum()
+                total_sampled_error += len(flat_sel)
 
-        loss_e = torch.stack(active_error_losses).mean() if active_error_losses else 0.0 * fplus_work.sum()
+        if active_error_losses:
+            if self.error_reduction == "pixel_mean" and total_sampled_error > 0:
+                loss_e = total_pixel_e_loss / (float(total_sampled_error) + self.eps)
+            else:
+                loss_e = torch.stack(active_error_losses).mean()
+        else:
+            loss_e = 0.0 * fplus_work.sum()
         loss_ours = loss_b + self.beta * loss_e
 
         return loss_ours, {

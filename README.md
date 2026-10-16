@@ -39,6 +39,45 @@ FromCoreToBoundary/
 
 ---
 
+## 🗂️ Datasets & Pre-trained Checkpoints
+
+### 1. Download Links
+
+| Asset | Classes | Resolution | Split Summary | Download Link | Target Path |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| **Synapse (BTCV)** | `9` (BG + 8 organs) | `512 × 512` | `2,211` train slices (`18` cases) / `12` test 3D CT volumes | [Google Drive](https://drive.google.com/file/d/1wvmw8DVyDKr5sOAFn5zUpfhbK4Vxjze4/view) | `data/btcv/` |
+| **ACDC** | `4` (BG, RV, Myo, LV) | `256 × 256` | `1,304` train slices (`70` cases) / `40` test 3D MRI volumes | [Google Drive](https://drive.google.com/file/d/1CruCQ-jjvA97BX-LIYwXaRMLmp3DN9zc/view) | `data/ACDC/` |
+| **Polyp** | `1` (binary channel) | `256 × 256` | `1,450` train images / `5` test sets (`798` images) | [Google Drive](https://drive.google.com/file/d/1pFxb9NbM8mj_rlSawTlcXG1OdVGAbRQC/view?usp=sharing) | `data/dataset/` |
+| **SAM ViT-L Base** | — | — | Pre-trained SAM ViT-L backbone & prompt/mask decoder | [Meta AI (`sam_vit_l_0b3195.pth`)](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth) | `data/weights/sam_vit_l_0b3195.pth` |
+| **Teacher & IAD Checkpoints** | — | — | Pre-trained Teacher & Student weights (`epoch_299.pth`, `acdc_tea.pth`, `polyp_tea.pth`) | [Baidu Netdisk (Code: `2234`)](https://pan.baidu.com/s/1AplUfjHojNvPJykyecSwig?pwd=2234) | `teacher_weights/` |
+
+### 2. Expected Data Directory Layout
+
+```text
+data/
+├── btcv/
+│   ├── train_npz/                 # 2,211 .npz slices (case0005_slice000.npz, ...)
+│   └── test_vol_h5/               # 12 .npy.h5 volumes (case0001.npy.h5, ...)
+├── lists_Synapse/
+│   ├── train.txt
+│   └── test_vol.txt
+├── ACDC/
+│   ├── train/                     # 1,304 .npz slices
+│   ├── valid/                     # 182 .npz slices
+│   ├── test/                      # 40 .npz 3D volumes
+│   └── lists_ACDC/
+│       ├── train.txt
+│       ├── valid.txt
+│       └── test.txt
+├── dataset/
+│   ├── TrainDataset/              # images/ & masks/ (1,450 pairs)
+│   └── TestDataset/               # Kvasir, CVC-ClinicDB, CVC-ColonDB, ETIS-LaribPolypDB, CVC-300
+└── weights/
+    └── sam_vit_l_0b3195.pth
+```
+
+---
+
 ## 🚀 Usage (`main.py`)
 
 ### 1. Training (`--mode train`)
@@ -85,13 +124,3 @@ python main.py --mode eval --dataset acdc --eval_role teacher --ckpt teacher_wei
 | `--student_ckpt` | `None` | Optional initial student checkpoint path. |
 | `--resume` | `None` | Checkpoint path to resume training from, or `auto`. |
 | `--output_dir` | `runs/ours` | Output directory for checkpoints and logs. |
-
----
-
-## 🗂️ Datasets & Pre-trained Checkpoints
-
-| Dataset | Classes | Resolution | Train Split | Test Split | Default Teacher Checkpoint |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| **Synapse (BTCV)** | `9` (BG + 8 organs) | `512 × 512` | `2,211` 2D slices (`18` cases) | `12` 3D CT volumes | `teacher_weights/epoch_299.pth` |
-| **ACDC** | `4` (BG, RV, Myo, LV) | `256 × 256` | `1,304` 2D slices (`70` cases) | `40` 3D MRI volumes (`20` patients × ED/ES) | `teacher_weights/acdc_tea.pth` |
-| **Polyp** | `1` (binary channel) | `256 × 256` | `1,450` RGB images | `5` benchmark sets (`798` images) | `teacher_weights/polyp_tea.pth` |

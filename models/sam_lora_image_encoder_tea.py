@@ -1,5 +1,4 @@
-from segment_anything_Tea import build_sam, SamPredictor
-from segment_anything_Tea import sam_model_registry_tea
+from segment_anything_Tea import build_sam, sam_model_registry_tea
 
 import math
 import torch

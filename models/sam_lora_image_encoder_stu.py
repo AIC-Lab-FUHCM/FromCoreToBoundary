@@ -1,4 +1,3 @@
-from segment_anything_Tea import build_sam, SamPredictor
 from segment_anything_Stu import sam_model_registry
 
 import math

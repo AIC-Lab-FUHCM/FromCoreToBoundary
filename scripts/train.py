@@ -53,6 +53,12 @@ def apply_dataset_defaults(args: argparse.Namespace) -> str:
 
     if ds == "acdc":
         args.num_classes = 4
+        args.r = 1
+        args.k_bg = 128
+        args.k_fg = 128
+        args.kis_normalize = True
+        args.error_reduction = "pixel_mean"
+        args.gate_ref = "gt"
         if getattr(args, "teacher_ckpt", None) in (None, "teacher_weights/epoch_299.pth"):
             args.teacher_ckpt = spec["default_teacher_ckpt"]
         if getattr(args, "data_dir", None) == "data/btcv/train_npz":
@@ -65,6 +71,12 @@ def apply_dataset_defaults(args: argparse.Namespace) -> str:
             args.test_list = "data/ACDC/lists_ACDC/test.txt"
     elif ds == "polyp":
         args.num_classes = 1
+        args.r = 1
+        args.k_bg = 128
+        args.k_fg = 128
+        args.kis_normalize = True
+        args.error_reduction = "pixel_mean"
+        args.gate_ref = "gt"
         if getattr(args, "teacher_ckpt", None) in (None, "teacher_weights/epoch_299.pth"):
             args.teacher_ckpt = spec["default_teacher_ckpt"]
         if getattr(args, "data_dir", None) == "data/btcv/train_npz":
@@ -73,6 +85,9 @@ def apply_dataset_defaults(args: argparse.Namespace) -> str:
             args.test_dir = "data/dataset"
     else:
         args.num_classes = 9
+        args.kis_normalize = False
+        args.error_reduction = "class_balanced"
+        args.gate_ref = "base"
     return ds
 
 
@@ -288,8 +303,8 @@ def run_training(args: argparse.Namespace) -> dict:
             dataset=dataset,
         )
         stu_ckpt = args.student_ckpt if (args.student_ckpt and str(args.student_ckpt).lower() not in ("none", "null")) else None
-        student = build_student(REPO_ROOT, stu_ckpt, device, dataset=dataset)
-        ema_student = build_student(REPO_ROOT, stu_ckpt, device, dataset=dataset)
+        student = build_student(REPO_ROOT, stu_ckpt, device, dataset=dataset, base_ckpt=args.teacher_base_ckpt)
+        ema_student = build_student(REPO_ROOT, stu_ckpt, device, dataset=dataset, base_ckpt=args.teacher_base_ckpt)
         ema_student.load_state_dict(student.state_dict())
 
     ema_student.eval()
@@ -339,6 +354,7 @@ def run_training(args: argparse.Namespace) -> dict:
             feat_dim=c_num,
             cache_momentum=args.cache_momentum,
             feature_space="raw" if args.num_classes == 1 else "centered",
+            error_reduction=getattr(args, "error_reduction", "class_balanced"),
         ).to(device)
 
     kis_criterion = None
@@ -348,6 +364,7 @@ def run_training(args: argparse.Namespace) -> dict:
             dice_weight=0.9,
             sgs_weight=args.sgs_weight,
             kis_weight=args.kis_weight,
+            normalize_logits=(bool(getattr(args, "kis_normalize", False)) and method != "iad"),
         ).to(device)
 
     baseline_kd_criterion = None
@@ -512,11 +529,12 @@ def run_training(args: argparse.Namespace) -> dict:
                         ema_out = ema_student(img, return_logits=True) if getattr(args, "smoke_test", False) else ema_student(img, True)
                         fplus_ema = ema_out[0] if isinstance(ema_out, (tuple, list)) else ema_out
 
-                    g_base = torch.autograd.grad(loss_base, logits, retain_graph=True)[0].detach()
+                    use_base_ref = getattr(args, "gate_ref", "base") == "base"
+                    g_base = torch.autograd.grad(loss_base, logits, retain_graph=True)[0].detach() if use_base_ref else None
                     if args.num_classes == 1:
                         ours_fplus = lift_binary_logits(logits)
                         ours_fplus_ema = lift_binary_logits(fplus_ema) if fplus_ema is not None else None
-                        ours_g_ref = torch.cat([-g_base, g_base], dim=1)
+                        ours_g_ref = torch.cat([-g_base, g_base], dim=1) if g_base is not None else None
                     else:
                         ours_fplus = logits
                         ours_fplus_ema = fplus_ema
