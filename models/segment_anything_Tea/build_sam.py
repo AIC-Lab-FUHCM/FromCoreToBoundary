@@ -10,7 +10,7 @@ from icecream import ic
 
 from functools import partial
 
-from .modeling import ImageEncoderViT, MaskDecoder_224, MaskDecoder2_224, MaskDecoder_512, MaskDecoder2_512, PromptEncoder, Sam, TwoWayTransformer, TwoWayTransformer2
+from .modeling import ImageEncoderViT, MaskDecoder_224, MaskDecoder2_224, PromptEncoder, Sam, TwoWayTransformer, TwoWayTransformer2
 
 
 def build_sam_vit_h(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],

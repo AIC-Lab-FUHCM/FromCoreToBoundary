@@ -1,6 +1,5 @@
-"""Loss functions for FromCoreToBoundary (Ours) and Knowledge Distillation benchmarks."""
 from losses.kis_loss import KISLoss
-from losses.ours_loss import CBAv2Loss, OursLoss, compute_boundary_bands
+from losses.ours_loss import OursLoss
 from losses.kd_baselines import (
     BaselineKDLoss,
     DISTPlusLoss,
@@ -12,8 +11,6 @@ from losses.kd_baselines import (
 __all__ = [
     "KISLoss",
     "OursLoss",
-    "CBAv2Loss",
-    "compute_boundary_bands",
     "IADKasHead",
     "LSKDLoss",
     "SinKDLoss",

@@ -9,11 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from typing import Any, Dict, List, Tuple
-from .Levit import LeViT_128S
-from .TinyViT import tiny_vit_5m_224
 from .Efficient import EfficientNet
-from .mobilenetV2 import mobilenet_v2
-from .mobilenetV3 import MobileNetV3_Large
 from .image_encoder import ImageEncoderViT
 from .mask_decoder_224 import MaskDecoder_224, MaskDecoder2_224
 from .prompt_encoder import PromptEncoder
@@ -23,7 +19,6 @@ import torchvision
 import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
-from segment_anything_Tea.modeling.Pvtv2 import *
 
 
 

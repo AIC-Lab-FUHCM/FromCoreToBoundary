@@ -1,58 +1,20 @@
-"""Knowledge distillation baseline losses for the 300-epoch BTCV benchmark.
-
-Implements:
-  - IAD Stage 2 (KAS: Residual Feature Calibration + Contrastive Semantic Separation)
-    with registered Conv2d parameters ``pos`` (1x1) and ``neg`` (3x3).
-  - LSKD (CVPR 2024): Logit Standardization Knowledge Distillation.
-  - SinKD: Differentiable Sinkhorn Optimal Transport Distillation (with teacher
-    detached, student attached, L2-normalized features, and row-min shift stabilization).
-  - DIST+ (TPAMI 2025): Inter-class and intra-class Pearson correlation distillation
-    computed in float32 to prevent mixed-precision overflow over spatial pixels.
-"""
-
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-for _p in (_REPO_ROOT, _REPO_ROOT / "models", _REPO_ROOT / "scripts"):
-    if _p.is_dir() and str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 from losses.kis_loss import DiceLoss, structure_loss
 
 
 def z_score_standardize_2d(logits: torch.Tensor, tau: float = 2.0, eps: float = 1e-3) -> torch.Tensor:
-    """Sample-wise Z-score standardization over the class dimension in float32."""
     logits_f = logits.float()
     mean = logits_f.mean(dim=1, keepdim=True)
     std = logits_f.std(dim=1, keepdim=True) + eps
     return (logits_f - mean) / (std * tau)
-
-
-def logit_standardization_kd_loss(
-    student_logits: torch.Tensor,
-    teacher_logits: torch.Tensor,
-    tau: float = 2.0,
-) -> torch.Tensor:
-    """Logit Standardization KD (LSKD, CVPR 2024) for 2D segmentation logits."""
-    stu_f = student_logits.float()
-    tea_f = teacher_logits.detach().float()
-    if tea_f.shape[-2:] != stu_f.shape[-2:]:
-        tea_f = F.interpolate(tea_f, size=stu_f.shape[-2:], mode="bilinear", align_corners=False)
-    z_s = z_score_standardize_2d(stu_f, tau)
-    z_t = z_score_standardize_2d(tea_f, tau)
-    q_t = F.softmax(z_t, dim=1).clamp(min=1e-8, max=1.0)
-    q_s_log = F.log_softmax(z_s, dim=1)
-    kd_pixel = F.kl_div(q_s_log, q_t, reduction="none")
-    return kd_pixel.sum(dim=1).mean() * (tau ** 2)
 
 
 def sinkhorn_loss(
@@ -64,7 +26,6 @@ def sinkhorn_loss(
     eps: float = 1e-8,
     normalize: bool = True,
 ) -> torch.Tensor:
-    """Differentiable Sinkhorn distance loss (L_SD) with teacher detached and row-min stabilization."""
     if t.dim() == 4 and s.dim() == 4 and t.shape[-2:] != s.shape[-2:]:
         t = F.interpolate(t.detach().float(), size=s.shape[-2:], mode="bilinear", align_corners=False)
     else:
@@ -110,8 +71,6 @@ def intra_class_relation(y_s: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
 
 
 class DIST(nn.Module):
-    """DIST+ inter-class and intra-class correlation loss in float32."""
-
     def __init__(self, beta: float = 1.0, gamma: float = 1.0, tau: float = 1.0):
         super().__init__()
         self.beta = float(beta)
@@ -119,7 +78,6 @@ class DIST(nn.Module):
         self.tau = float(tau)
 
     def forward(self, y_s: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
-        assert y_s.ndim in (2, 4)
         y_s = y_s.float()
         y_t = y_t.detach().float()
         if y_s.ndim == 4:
@@ -130,19 +88,10 @@ class DIST(nn.Module):
             y_t = y_t.permute(0, 2, 3, 1).reshape(-1, num_classes)
         y_s = (y_s / self.tau).softmax(dim=1)
         y_t = (y_t / self.tau).softmax(dim=1)
-        inter_loss = inter_class_relation(y_s, y_t)
-        intra_loss = intra_class_relation(y_s, y_t)
-        return self.beta * inter_loss + self.gamma * intra_loss
+        return self.beta * inter_class_relation(y_s, y_t) + self.gamma * intra_class_relation(y_s, y_t)
 
 
 class IADKasHead(nn.Module):
-    """Registered KAS projection head for IAD Stage 2 (RFC + CSS, Paper Eq. 6 & Eq. 8).
-
-    Fixes the original author's inline ``nn.Conv2d`` bug in ``Synapse_Tool_KD/trainer.py``
-    by registering ``pos`` (256 -> C, 1x1) and ``neg`` (C -> C, 3x3) as persistent
-    ``nn.Module`` parameters optimized alongside the student.
-    """
-
     def __init__(self, in_channels: int = 256, num_classes: int = 9):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -179,31 +128,24 @@ class IADKasHead(nn.Module):
                 p_fp = F.softmax(f_plus, dim=1)
             f_neg = self.neg(((1.0 - p_os) + (1.0 - p_fp)).float()).float()
 
-            # RFC loss: L2 + self-Dice between F+ and Os
             loss_l2 = F.mse_loss(f_plus, os_f)
             inter = (p_fp * p_os).sum(dim=(2, 3))
             union = (p_fp + p_os).sum(dim=(2, 3))
             loss_self_dice = 1.0 - ((2.0 * inter + 1e-6) / (union + 1e-6)).mean()
             loss_rfc = loss_l2 + loss_self_dice
 
-            # CSS loss: global cosine InfoNCE in float32 via numerically stable softplus
             s_pos = F.cosine_similarity(os_f.flatten(1), f_plus.flatten(1), dim=1, eps=1e-8)
             s_neg = F.cosine_similarity(os_f.flatten(1), f_neg.flatten(1), dim=1, eps=1e-8)
             loss_css = F.softplus((s_neg - s_pos) / float(temperature)).mean()
-
             loss_kas = loss_rfc + loss_css
         return {
             "loss_kas": loss_kas,
             "loss_rfc": loss_rfc,
             "loss_css": loss_css,
-            "f_plus": f_plus,
-            "f_neg": f_neg,
         }
 
 
 class LSKDLoss(nn.Module):
-    """Logit Standardization Knowledge Distillation (Sun et al., CVPR 2024)."""
-
     def __init__(self, tau: float = 2.0, eps: float = 1e-3):
         super().__init__()
         self.tau = float(tau)
@@ -215,8 +157,6 @@ class LSKDLoss(nn.Module):
         if tea_f.shape[-2:] != stu_f.shape[-2:]:
             tea_f = F.interpolate(tea_f, size=stu_f.shape[-2:], mode="bilinear", align_corners=False)
         if stu_f.shape[1] == 1:
-            # Binary segmentation (C=1): standardize logits per-sample across spatial pixels,
-            # then compute pixel-averaged binary KL divergence over [1 - sigmoid(z), sigmoid(z)].
             z_s = (stu_f - stu_f.mean(dim=(2, 3), keepdim=True)) / (
                 (stu_f.std(dim=(2, 3), keepdim=True) + self.eps) * self.tau
             )
@@ -234,16 +174,7 @@ class LSKDLoss(nn.Module):
 
 
 class SinKDLoss(nn.Module):
-    """Differentiable Sinkhorn Distance Knowledge Distillation."""
-
-    def __init__(
-        self,
-        lam: float = 10.0,
-        max_iter: int = 5,
-        p: float = 2.0,
-        eps: float = 1e-8,
-        normalize: bool = True,
-    ):
+    def __init__(self, lam: float = 10.0, max_iter: int = 5, p: float = 2.0, eps: float = 1e-8, normalize: bool = True):
         super().__init__()
         self.lam = float(lam)
         self.max_iter = int(max_iter)
@@ -264,8 +195,6 @@ class SinKDLoss(nn.Module):
 
 
 class DISTPlusLoss(nn.Module):
-    """DIST+ inter-class and intra-class relation distillation in float32."""
-
     def __init__(self, beta: float = 1.0, gamma: float = 1.0, tau: float = 1.0):
         super().__init__()
         self.beta = float(beta)
@@ -283,20 +212,11 @@ class DISTPlusLoss(nn.Module):
             p_t = torch.sigmoid(tea_f / self.tau).flatten(1)
             y_s_2c = torch.stack([1.0 - p_s.reshape(-1), p_s.reshape(-1)], dim=1)
             y_t_2c = torch.stack([1.0 - p_t.reshape(-1), p_t.reshape(-1)], dim=1)
-            inter_loss = inter_class_relation(p_s, p_t)
-            intra_loss = intra_class_relation(y_s_2c, y_t_2c)
-            return self.beta * inter_loss + self.gamma * intra_loss
+            return self.beta * inter_class_relation(p_s, p_t) + self.gamma * intra_class_relation(y_s_2c, y_t_2c)
         return self.dist(student_logits, teacher_logits)
 
 
 class BaselineKDLoss(nn.Module):
-    """Combined supervised segmentation loss (L_SGS) + KD baseline objective.
-
-    Follows the benchmark weighting:
-      L_SGS = (1 - dice_weight) * CE + dice_weight * Dice (or structure_loss for C=1 binary)
-      L_total = sgs_weight * L_SGS + kd_weight * L_KD
-    """
-
     def __init__(
         self,
         method: str,
@@ -317,7 +237,6 @@ class BaselineKDLoss(nn.Module):
         self.dice_weight = float(dice_weight)
         self.sgs_weight = float(sgs_weight)
         self.kd_weight = float(kd_weight)
-
         self.ce_loss = nn.CrossEntropyLoss()
         self.dice_loss = DiceLoss(n_classes=max(2, self.num_classes))
 
@@ -330,7 +249,7 @@ class BaselineKDLoss(nn.Module):
         elif self.method == "sgs_only":
             self.kd_criterion = None
         else:
-            raise ValueError(f"Unsupported BaselineKDLoss method: {method!r}")
+            raise ValueError(f"Unsupported method: {method!r}")
 
     def forward_sgs(self, outputs_student: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         dev_type = outputs_student.device.type if outputs_student.device.type in ("cuda", "cpu") else "cpu"
@@ -373,16 +292,3 @@ class BaselineKDLoss(nn.Module):
         metrics["loss_kd"] = loss_kd.detach()
         metrics["loss_base"] = loss_base.detach()
         return loss_base, metrics
-
-
-__all__ = [
-    "IADKasHead",
-    "LSKDLoss",
-    "SinKDLoss",
-    "DISTPlusLoss",
-    "BaselineKDLoss",
-    "logit_standardization_kd_loss",
-    "sinkhorn_loss",
-    "DIST",
-]
-

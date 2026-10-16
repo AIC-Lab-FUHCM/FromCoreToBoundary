@@ -19,7 +19,6 @@ import torchvision
 import torchvision.transforms as transforms
 import numpy as np
 from PIL import Image
-from segment_anything_Tea.modeling.Pvtv2 import *
 
 
 
