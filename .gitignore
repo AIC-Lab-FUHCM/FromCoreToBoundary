@@ -1,0 +1,54 @@
+# Data, weights, and large archives (keep split lists tracked)
+data/*
+!data/lists_Synapse/
+!data/ACDC/
+data/ACDC/*
+!data/ACDC/lists_ACDC/
+teacher_weights/
+checkpoints/
+*.pth
+*.zip
+
+# Run outputs, builds, and Colab upload mirrors
+runs/
+outputs/
+dist/
+colab_upload/
+
+# Legacy / archived experiments, docs, figures, and pilot files
+archive/
+notebooks/archive/
+docs/
+figures/
+experiments/kas_oa_h4/
+IAD_COLAB_FULL_100EP/
+fnr_tier1/
+fnr_tier2/
+h4_conditional_info_2026*/
+h4_gradient_audit/
+h4_tier1/
+kas_causal/
+kas_causal_resume/
+kas_confirm/
+kas_confirm_a100/
+kas_continue/
+local_eval_iad_init/
+local_h4_full_2026*/
+local_h4_full_data_*/
+local_h4_smoke_2026*/
+local_smoke_2026*/
+local_verify_SGS_1ep/
+sgs_smoke/
+sgs_smoke2/
+student_baseline_runs/
+teacher_epoch149_test/
+teacher_epoch224_test/
+
+# Python / IDE / tooling caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.ua/
+.codex_spreadsheet_work/
+nul
