@@ -1,23 +1,19 @@
-"""Shared launcher for the 300-epoch main runs (see run_main_kis.py and run_main_ours.py).
+"""Shared launcher for the 300-epoch main benchmark runs (see run_main_ours.py, run_main_iad.py, etc.).
 
-Both runs train on all 18 training cases and evaluate on the 12 official test volumes only at epoch 300.
+Trains on the full training split and evaluates on the official test volumes/sets at epoch 300.
 The reported model is the epoch-300 model; there is no best-on-test checkpoint.
 
-The first 20 epochs are identical for every arm (lambda_A = 0 during the curriculum warmup), so they are run once
-as a KIS "warmup" job (LR schedule length = --epochs) and every arm forks from its epoch-20 checkpoint:
+The first 20 epochs are identical for every KIS/Ours arm (lambda_A = 0 during curriculum warmup), so they are
+run once as a shared KIS "warmup" job (LR schedule length = --epochs) and every arm forks from its epoch-20
+checkpoint:
 
     <runs_dir>/warmup/Arm_V1_KIS/checkpoint_epoch_020.pth   (+ the same file in <drive_dir>/warmup/)
 
-Those legacy names are retained for seed 2345. Additional seeds use warmup_s<seed>,
-kis300_s<seed>, and ours_<arm>_s<seed> so warmups, resumes, and completion checks cannot cross seeds.
-
-The first script that needs the warmup creates it when --make_warmup is set; otherwise it waits for another
-session to create it. Both arms must be launched with the same --epochs. Finished runs are skipped and
-interrupted runs resume from their latest checkpoint (local or Drive), so re-running the same command is safe.
-
-Method parameters of "ours" come from the tuning state file (default: <drive_dir>/../tune/tune_state.json),
-falling back to the defaults lambda_A=0.02, tau=0.1, m=0.2, r=2, beta=0.5.
+Additional seeds use warmup_s<seed>, kis300_s<seed>, and ours_<arm>_s<seed> so warmups, resumes, and
+completion checks are strictly isolated per seed.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -29,11 +25,25 @@ from pathlib import Path
 from typing import List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-for _p in (REPO_ROOT, REPO_ROOT / "models", REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "tools"):
+for _p in (REPO_ROOT, REPO_ROOT / "models", REPO_ROOT / "scripts"):
     if _p.is_dir() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import run_tuning as rt  # noqa: E402
+ARM_DIRS = {
+    "v1": "Arm_V1_KIS",
+    "v2": "Arm_V2_Boundary",
+    "v3": "Arm_V3_Error",
+    "v4": "Arm_V4_Dual_Contrastive",
+    "v5": "Arm_V5_Dual_CEHard",
+    "iad": "Arm_IAD_200_100",
+    "lskd": "Arm_LSKD",
+    "sinkd": "Arm_SinKD",
+    "dist_plus": "Arm_DIST_Plus",
+    "sgs_only": "Arm_SGS_Only",
+}
+WARMUP_EPOCHS = 20
+DEFAULT_STATE = {"lambda_a": 0.02, "tau": 0.1, "m": 0.2, "r": 2, "beta": 0.5, "decisions": {}}
+STATE_TO_FLAG = {"lambda_a": "--lambda_a", "tau": "--tau", "m": "--m", "r": "--r", "beta": "--beta"}
 
 KIND_DIRS = {
     "kis": "kis300",
@@ -51,28 +61,94 @@ OURS_PARAMS = {
 }
 
 
+def fmt(x) -> str:
+    return f"{x:g}"
+
+
+def _runs_dir_variants(runs_dir: str) -> List[str]:
+    out = [runs_dir]
+    if runs_dir and not os.path.isabs(runs_dir) and Path.cwd().resolve() != REPO_ROOT.resolve():
+        out.append(os.path.join(str(REPO_ROOT), runs_dir))
+    return out
+
+
+def load_state(path: Optional[str]) -> dict:
+    for cand in _runs_dir_variants(path) if path else []:
+        if os.path.isfile(cand):
+            with open(cand, "r", encoding="utf-8") as fh:
+                st = json.load(fh)
+            merged = dict(DEFAULT_STATE)
+            merged.update(st)
+            return merged
+    return json.loads(json.dumps(DEFAULT_STATE))
+
+
+def arm_dir(runs_dir: str, job: dict) -> str:
+    return os.path.join(runs_dir, job["name"], ARM_DIRS[job["arm"]])
+
+
+def is_done(job: dict, runs_dir: str, drive_dir: Optional[str]) -> bool:
+    for r_dir in _runs_dir_variants(runs_dir):
+        if os.path.isfile(os.path.join(arm_dir(r_dir, job), "eval_final.json")):
+            return True
+    return bool(drive_dir) and os.path.isfile(os.path.join(drive_dir, job["name"], "eval_final.json"))
+
+
+def has_own_checkpoint(job: dict, runs_dir: str, drive_dir: Optional[str]) -> bool:
+    for r_dir in _runs_dir_variants(runs_dir):
+        if os.path.isfile(os.path.join(arm_dir(r_dir, job), "latest_checkpoint.pth")):
+            return True
+    return bool(drive_dir) and os.path.isfile(os.path.join(drive_dir, job["name"], "latest_checkpoint.pth"))
+
+
+def _resolve_exec_cmd(cmd: List[str]) -> List[str]:
+    if len(cmd) >= 2 and cmd[1] == "scripts/train.py" and not (Path.cwd() / "scripts" / "train.py").exists():
+        cand = REPO_ROOT / "scripts" / "train.py"
+        if cand.exists():
+            return [cmd[0], str(cand)] + list(cmd[2:])
+    return cmd
+
+
 def seed_name(name: str, seed: int) -> str:
     """Keep the existing seed-2345 paths; isolate every additional seed."""
     return name if seed == 2345 else f"{name}_s{seed}"
 
 
-def job_for(kind: str, arm: Optional[str], state: dict, epochs: int, ratio_cap: float = 0.0,
-            seed: int = 2345, kis_stage_epochs: int = 200) -> dict:
-    use_warmup = bool(epochs > rt.WARMUP_EPOCHS)
+def job_for(
+    kind: str,
+    arm: Optional[str],
+    state: dict,
+    epochs: int,
+    ratio_cap: float = 0.0,
+    seed: int = 2345,
+    kis_stage_epochs: int = 200,
+) -> dict:
+    use_warmup = bool(epochs > WARMUP_EPOCHS)
     if kind == "kis":
         return dict(name=seed_name(KIND_DIRS["kis"], seed), arm="v1", epochs=epochs, params={}, needs_warmup=use_warmup)
     if kind == "iad":
         extra = ["--kis_stage_epochs", str(kis_stage_epochs)] if kis_stage_epochs != 200 else []
-        return dict(name=seed_name(KIND_DIRS["iad"], seed), arm="iad", epochs=epochs, params={},
-                    extra=extra, needs_warmup=False)
+        return dict(
+            name=seed_name(KIND_DIRS["iad"], seed),
+            arm="iad",
+            epochs=epochs,
+            params={},
+            extra=extra,
+            needs_warmup=False,
+        )
     if kind in ("lskd", "sinkd", "dist_plus", "sgs_only"):
         return dict(name=seed_name(KIND_DIRS[kind], seed), arm=kind, epochs=epochs, params={}, needs_warmup=False)
     if arm not in OURS_PARAMS:
         raise ValueError(f"ours supports arms {sorted(OURS_PARAMS)}, got {arm!r}")
-    job = dict(name=f"ours_{arm}", arm=arm, epochs=epochs,
-               params={k: state[k] for k in OURS_PARAMS[arm]}, needs_warmup=use_warmup)
-    if ratio_cap > 0.0:  # separate folder so it never mixes with the uncapped run
-        job.update(name=f"ours_{arm}cap", extra=["--lambda_ratio_cap", rt.fmt(ratio_cap)])
+    job = dict(
+        name=f"ours_{arm}",
+        arm=arm,
+        epochs=epochs,
+        params={k: state[k] for k in OURS_PARAMS[arm]},
+        needs_warmup=use_warmup,
+    )
+    if ratio_cap > 0.0:
+        job.update(name=f"ours_{arm}cap", extra=["--lambda_ratio_cap", fmt(ratio_cap)])
     job["name"] = seed_name(job["name"], seed)
     return job
 
@@ -82,7 +158,7 @@ def _is_sol12_run_dir(folder: Optional[str]) -> bool:
         return False
     cfg_candidates = [
         os.path.join(folder, "run_config.json"),
-        os.path.join(folder, rt.ARM_DIRS.get("v5", "Arm_V5_Dual_CEHard"), "run_config.json"),
+        os.path.join(folder, ARM_DIRS.get("v5", "Arm_V5_Dual_CEHard"), "run_config.json"),
     ]
     for cfg_path in cfg_candidates:
         if not os.path.isfile(cfg_path):
@@ -102,7 +178,6 @@ def _is_sol12_run_dir(folder: Optional[str]) -> bool:
 
 
 def archive_sol12_run_if_needed(job: dict, runs_dir: str, drive_dir: Optional[str], dry_run: bool = False) -> List[str]:
-    """Archive any stale Solution 1+2 v5 run folder so original ours_v5 can resume cleanly from warmup."""
     if job.get("arm") != "v5":
         return []
     archived: List[str] = []
@@ -124,14 +199,14 @@ def archive_sol12_run_if_needed(job: dict, runs_dir: str, drive_dir: Optional[st
 
 def find_warmup_ckpt(runs_dir: str, drive_dir: Optional[str], seed: int) -> Optional[str]:
     name = seed_name("warmup", seed)
-    checkpoint = f"checkpoint_epoch_{rt.WARMUP_EPOCHS:03d}.pth"
+    checkpoint = f"checkpoint_epoch_{WARMUP_EPOCHS:03d}.pth"
     candidates = [
-        os.path.join(r_dir, name, rt.ARM_DIRS["v1"], checkpoint)
-        for r_dir in rt._runs_dir_variants(runs_dir)
+        os.path.join(r_dir, name, ARM_DIRS["v1"], checkpoint)
+        for r_dir in _runs_dir_variants(runs_dir)
     ]
     if drive_dir:
         candidates.append(os.path.join(drive_dir, name, checkpoint))
-        candidates.append(os.path.join(drive_dir, name, rt.ARM_DIRS["v1"], checkpoint))
+        candidates.append(os.path.join(drive_dir, name, ARM_DIRS["v1"], checkpoint))
     return next((path for path in candidates if os.path.isfile(path)), None)
 
 
@@ -155,17 +230,32 @@ def normalize_dataset(dataset: str) -> str:
     raise ValueError(f"Unsupported dataset {dataset!r}. Expected 'synapse', 'acdc', or 'polyp'.")
 
 
-def warmup_command(epochs: int, runs_dir: str, drive_dir: Optional[str], seed: int,
-                   python: str = sys.executable, dataset: str = "synapse",
-                   extra_train_args: Optional[List[str]] = None) -> List[str]:
+def warmup_command(
+    epochs: int,
+    runs_dir: str,
+    drive_dir: Optional[str],
+    seed: int,
+    python: str = sys.executable,
+    dataset: str = "synapse",
+    extra_train_args: Optional[List[str]] = None,
+) -> List[str]:
     ds = normalize_dataset(dataset)
     name = seed_name("warmup", seed)
-    cmd = [python, "run_cba_v2.py"]
+    cmd = [python, "scripts/train.py"]
     if ds != "synapse":
         cmd += ["--dataset", ds]
-    cmd += ["--arm", "v1", "--epochs", str(rt.WARMUP_EPOCHS), "--sched_epochs", str(epochs),
-            "--output_dir", os.path.join(runs_dir, name), "--eval_freq", "0", "--skip_eval", "--no-save_final_preds",
-            "--drive_sync_every", "5", "--seed", str(seed), "--resume", "auto"]
+    cmd += [
+        "--arm", "v1",
+        "--epochs", str(WARMUP_EPOCHS),
+        "--sched_epochs", str(epochs),
+        "--output_dir", os.path.join(runs_dir, name),
+        "--eval_freq", "0",
+        "--skip_eval",
+        "--no-save_final_preds",
+        "--drive_sync_every", "5",
+        "--seed", str(seed),
+        "--resume", "auto",
+    ]
     if drive_dir:
         cmd += ["--drive_sync_dir", os.path.join(drive_dir, name)]
     if extra_train_args:
@@ -173,24 +263,38 @@ def warmup_command(epochs: int, runs_dir: str, drive_dir: Optional[str], seed: i
     return cmd
 
 
-def main_command(job: dict, runs_dir: str, drive_dir: Optional[str], warmup_ckpt: Optional[str], seed: int,
-                 eval_freq: int, python: str = sys.executable, dataset: str = "synapse",
-                 extra_train_args: Optional[List[str]] = None) -> List[str]:
+def main_command(
+    job: dict,
+    runs_dir: str,
+    drive_dir: Optional[str],
+    warmup_ckpt: Optional[str],
+    seed: int,
+    eval_freq: int,
+    python: str = sys.executable,
+    dataset: str = "synapse",
+    extra_train_args: Optional[List[str]] = None,
+) -> List[str]:
     ds = normalize_dataset(dataset)
-    cmd = [python, "run_cba_v2.py"]
+    cmd = [python, "scripts/train.py"]
     if ds != "synapse":
         cmd += ["--dataset", ds]
-    cmd += ["--arm", job["arm"], "--epochs", str(job["epochs"]),
-            "--sched_epochs", str(job["epochs"]), "--output_dir", os.path.join(runs_dir, job["name"]),
-            "--eval_freq", str(eval_freq), "--drive_sync_every", "5", "--seed", str(seed)]
+    cmd += [
+        "--arm", job["arm"],
+        "--epochs", str(job["epochs"]),
+        "--sched_epochs", str(job["epochs"]),
+        "--output_dir", os.path.join(runs_dir, job["name"]),
+        "--eval_freq", str(eval_freq),
+        "--drive_sync_every", "5",
+        "--seed", str(seed),
+    ]
     if drive_dir:
         cmd += ["--drive_sync_dir", os.path.join(drive_dir, job["name"])]
     for key, val in job["params"].items():
-        cmd += [rt.STATE_TO_FLAG[key], rt.fmt(val)]
+        cmd += [STATE_TO_FLAG[key], fmt(val)]
     cmd += job.get("extra", [])
     if extra_train_args:
         cmd += list(extra_train_args)
-    own = rt.has_own_checkpoint(job, runs_dir, drive_dir)
+    own = has_own_checkpoint(job, runs_dir, drive_dir)
     if job.get("needs_warmup", True):
         cmd += ["--resume", "auto" if own else str(warmup_ckpt)]
     else:
@@ -223,10 +327,9 @@ def build_parser(kind: str) -> argparse.ArgumentParser:
     if kind == "ours":
         ap.add_argument("--arm", choices=sorted(OURS_PARAMS), default="v5",
                         help="v5 = KIS + Boundary + Error-CE-hard (default), v2 = KIS + Boundary")
-        ap.add_argument("--state_json", default=None, help="Tuning state file with the method parameters")
+        ap.add_argument("--state_json", default=None, help="Optional JSON file with Ours parameters")
         ap.add_argument("--lambda_ratio_cap", type=float, default=0.0,
-                        help="If > 0, cap lambda_A * ||g_CBA|| / ||g_base|| (logit space) at this value; the run is "
-                             "written to ours_<arm>cap (default: off)")
+                        help="If > 0, cap lambda_A * ||g_CBA|| / ||g_base|| (logit space) at this value (default: off)")
         ap.add_argument("--lambda_a", type=float, default=None, help="Explicit CLI override for lambda_A")
         ap.add_argument("--tau", type=float, default=None, help="Explicit CLI override for tau")
         ap.add_argument("--m", type=float, default=None, help="Explicit CLI override for m")
@@ -242,10 +345,10 @@ def run_main(kind: str, argv=None, extra_train_args: Optional[List[str]] = None)
     if ds != "synapse" and a.runs_dir == "runs/main":
         a.runs_dir = f"runs/{ds}_main"
 
-    state = dict(rt.DEFAULT_STATE)
+    state = dict(DEFAULT_STATE)
     if kind == "ours":
         path = a.state_json or default_state_path(a.drive_dir)
-        state = rt.load_state(path) if path else rt.load_state("")
+        state = load_state(path) if path else load_state("")
         for k in OURS_PARAMS[a.arm]:
             cli_override = getattr(a, k, None)
             if cli_override is not None:
@@ -263,13 +366,13 @@ def run_main(kind: str, argv=None, extra_train_args: Optional[List[str]] = None)
 
     archive_sol12_run_if_needed(job, a.runs_dir, a.drive_dir)
 
-    if rt.is_done(job, a.runs_dir, a.drive_dir):
+    if is_done(job, a.runs_dir, a.drive_dir):
         print(f"[skip] {job['name']} ({ds}) already finished")
         return []
 
     wck = None
     effective_make_warmup = a.make_warmup or (ds != "synapse" and "--no-make_warmup" not in raw_argv)
-    if job.get("needs_warmup", True) and not rt.has_own_checkpoint(job, a.runs_dir, a.drive_dir):
+    if job.get("needs_warmup", True) and not has_own_checkpoint(job, a.runs_dir, a.drive_dir):
         wck = find_warmup_ckpt(a.runs_dir, a.drive_dir, a.seed)
         if wck is None and effective_make_warmup:
             cmd = warmup_command(
@@ -278,7 +381,7 @@ def run_main(kind: str, argv=None, extra_train_args: Optional[List[str]] = None)
             )
             print("[warmup] " + " ".join(cmd), flush=True)
             if not a.dry_run:
-                subprocess.run(rt._resolve_exec_cmd(cmd), cwd=str(REPO_ROOT), check=True)
+                subprocess.run(_resolve_exec_cmd(cmd), cwd=str(REPO_ROOT), check=True)
                 wck = find_warmup_ckpt(a.runs_dir, a.drive_dir, a.seed)
         elif wck is None:
             wck = wait_for_warmup(a.runs_dir, a.drive_dir, a.seed, 0 if a.dry_run else a.wait_min)
@@ -293,7 +396,5 @@ def run_main(kind: str, argv=None, extra_train_args: Optional[List[str]] = None)
     )
     print("[run] " + " ".join(cmd), flush=True)
     if not a.dry_run:
-        subprocess.run(rt._resolve_exec_cmd(cmd), cwd=str(REPO_ROOT), check=True)
+        subprocess.run(_resolve_exec_cmd(cmd), cwd=str(REPO_ROOT), check=True)
     return cmd
-
-

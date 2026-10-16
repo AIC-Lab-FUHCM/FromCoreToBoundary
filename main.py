@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py - Unified Top-Level CLI Entry Point for the IAD / CBA v2 Benchmark Repository.
+main.py - Unified Top-Level CLI Entry Point for the FromCoreToBoundary (Ours) Benchmark Repository.
 
 Exposes all input parameters required to train, reproduce, evaluate, tune, or package
 any Knowledge Distillation method or ablation arm across all supported medical segmentation datasets:
@@ -16,8 +16,6 @@ any Knowledge Distillation method or ablation arm across all supported medical s
     - v3          : Arm_V3_Error            (Ablation: KIS + Contrastive Error Stream L_E)
     - v4          : Arm_V4_Dual_Contrastive (Ablation: KIS + Dual Contrastive L_B + beta*L_E^contra)
     - sgs_only    : Arm_SGS_Only            (Supervised Ground-Truth Segmentation only, no Teacher KD)
-    - v5_far      : Arm_V5_FarFP            (Ablation: Ours v5 + Far-FP spatial distance penalty)
-    - kis_far     : Arm_V1_KIS_FarFP        (Ablation: KIS v1 + Far-FP spatial distance penalty)
 
   Datasets:
     - synapse     : Synapse / BTCV Multi-Organ CT (9 classes, 512x512, 18 train / 12 test 3D volumes)
@@ -44,9 +42,6 @@ Quick-Start Examples:
        python main.py --mode eval --dataset synapse --ckpt runs/main/ours_v5/Arm_V5_Dual_CEHard/final_student.pth
        python main.py --mode eval --dataset acdc --eval_role teacher --ckpt teacher_weights/acdc_tea.pth
        python main.py --eval_only --dataset polyp --ckpt teacher_weights/polyp_stu_iad.pth
-
-  5. Package self-contained Colab code bundle:
-       python main.py --mode package --bundle cba_v2
 """
 
 from __future__ import annotations
@@ -66,9 +61,9 @@ import h5py
 import numpy as np
 import torch
 
-# Ensure repository root, models, scripts, and tools directories are importable
+# Ensure repository root, models, and scripts directories are importable
 REPO_ROOT = Path(__file__).resolve().parent
-for _p in (REPO_ROOT, REPO_ROOT / "models", REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "tools"):
+for _p in (REPO_ROOT, REPO_ROOT / "models", REPO_ROOT / "scripts"):
     if _p.is_dir() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -80,14 +75,14 @@ atexit.register(
     ]
 )
 
-from experiments.cba_v2.evaluation import evaluate_volumes  # noqa: E402
-from experiments.cba_v2.models import (  # noqa: E402
+from scripts.evaluation import evaluate_volumes  # noqa: E402
+from models.builder import (  # noqa: E402
     DATASET_MODEL_SPECS,
     build_frozen_teacher,
     build_student,
     normalize_dataset_name,
 )
-from experiments.cba_v2.train import (  # noqa: E402
+from scripts.train import (  # noqa: E402
     PILOT_ARMS_V2,
     SimpleConvStudent,
     apply_dataset_defaults,
@@ -110,7 +105,7 @@ METHOD_SPECS: Dict[str, Dict[str, Optional[str]]] = {
         "launcher_arm": "v5",
         "category": "main_5methods",
         "formula": "0.8*L_SGS + 0.2*L_KIS + lambda_A*(L_B + beta*L_E^{CE})",
-        "description": "Proposed CBA v2 (KIS + Gated Boundary Stream + Error-Driven Hard-Pixel CE Stream)",
+        "description": "Proposed Ours / FromCoreToBoundary (KIS + Gated Boundary Stream + Error-Driven Hard-Pixel CE Stream)",
     },
     "iad": {
         "arm_name": "Arm_IAD_200_100",
@@ -183,22 +178,6 @@ METHOD_SPECS: Dict[str, Dict[str, Optional[str]]] = {
         "category": "ablation",
         "formula": "1.0*L_SGS (0.1*CE + 0.9*Dice or structure_loss, no Teacher KD)",
         "description": "Supervised Ground-Truth Segmentation Baseline (Student trained without Teacher)",
-    },
-    "v5_far": {
-        "arm_name": "Arm_V5_FarFP",
-        "launcher_kind": None,
-        "launcher_arm": None,
-        "category": "experimental",
-        "formula": "L_{Ours_V5} + lambda_far*L_FarFP",
-        "description": "Ours V5 with spatial Far-FP distance penalty",
-    },
-    "kis_far": {
-        "arm_name": "Arm_V1_KIS_FarFP",
-        "launcher_kind": None,
-        "launcher_arm": None,
-        "category": "experimental",
-        "formula": "L_{KIS} + lambda_far*L_FarFP",
-        "description": "KIS V1 with spatial Far-FP distance penalty",
     },
 }
 
@@ -384,9 +363,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         type=str,
         default="train",
-        choices=["train", "reproduce", "eval", "tune", "package"],
+        choices=["train", "reproduce", "eval"],
         help="Execution mode: 'train' (direct trainer), 'reproduce' (300-epoch benchmark launcher with shared warmup & resume), "
-             "'eval' (standalone checkpoint evaluation), 'tune' (hyperparameter tuning), or 'package' (build Colab zip bundle)",
+             "or 'eval' (standalone checkpoint evaluation)",
     )
     g_mode.add_argument(
         "--eval_only",
@@ -418,7 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Method selector: 'ours' (or 'v5'), 'iad', 'dist_plus', 'lskd', 'sinkd', 'kis' (or 'v1'), "
-             "'v2', 'v3', 'v4', 'sgs_only', 'v5_far', 'kis_far', or 'all' (in reproduce mode, runs all 5 main methods)",
+             "'v2', 'v3', 'v4', 'sgs_only', or 'all' (in reproduce mode, runs all 5 main methods)",
     )
     g_target.add_argument(
         "--arm",
@@ -534,10 +513,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # -------------------------------------------------------------------------
-    # [6] Ours (CBA v2) Boundary & Error-Stream Hyperparameters
+    # [6] Ours Boundary & Error-Stream Hyperparameters
     # -------------------------------------------------------------------------
-    g_cba = parser.add_argument_group("[6] Ours (CBA v2) Boundary & Error-Stream Hyperparameters")
-    g_cba.add_argument("--lambda_a", type=float, default=0.02, help="CBA assimilation loss coefficient lambda_A (default: 0.02)")
+    g_cba = parser.add_argument_group("[6] Ours Boundary & Error-Stream Hyperparameters")
+    g_cba.add_argument("--lambda_a", type=float, default=0.02, help="Assimilation loss coefficient lambda_A (default: 0.02)")
     g_cba.add_argument("--beta", type=float, default=0.5, help="Error-stream relative weight beta (default: 0.5)")
     g_cba.add_argument(
         "--lambda_ratio_cap",
@@ -563,7 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="centered",
         choices=["raw", "centered"],
-        help="Feature space for CBA: 'centered' (logits minus per-pixel class mean) or 'raw'",
+        help="Feature space for Ours: 'centered' (logits minus per-pixel class mean) or 'raw'",
     )
     g_cba.add_argument(
         "--gate_ref",
@@ -572,7 +551,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["ce", "base"],
         help="Directional gate reference gradient: 'base' (full base loss grad) or 'ce' (CE-to-GT grad)",
     )
-    g_cba.add_argument("--grad_log_every", type=int, default=50, help="Log CBA gradient diagnostics every N steps (0 disables)")
+    g_cba.add_argument("--grad_log_every", type=int, default=50, help="Log gradient diagnostics every N steps (0 disables)")
     g_cba.add_argument("--boundary_use_cache", action="store_true", help="Boundary stream uses EMA cache prototypes")
     g_cba.add_argument(
         "--boundary_fallback_cache",
@@ -595,7 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
     g_cba.add_argument("--no_curriculum", action="store_false", dest="use_curriculum", help="Alias for --no-use_curriculum")
     g_cba.add_argument("--curriculum_warmup", type=int, default=20, help="Curriculum warmup epochs where lambda_A = 0 (default: 20)")
     g_cba.add_argument("--curriculum_ramp", type=int, default=30, help="Curriculum linear ramp epochs from 0 to lambda_A (default: 30)")
-    g_cba.add_argument("--state_json", type=str, default=None, help="Path to tune_state.json for loading tuned Ours parameters")
+    g_cba.add_argument("--state_json", type=str, default=None, help="Optional JSON file with Ours parameters")
     g_cba.add_argument(
         "--make_warmup",
         action=argparse.BooleanOptionalAction,
@@ -629,52 +608,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_kd.add_argument("--dist_tau", type=float, default=1.0, help="DIST+ softmax temperature tau (default: 1.0)")
 
     # -------------------------------------------------------------------------
-    # [8] Far-FP & Experimental Error-Set Options
+    # [8] Checkpoints, Output Directories, Drive Sync & Evaluation
     # -------------------------------------------------------------------------
-    g_far = parser.add_argument_group("[8] Far-FP & Experimental Error-Set Options")
-    g_far.add_argument("--lambda_far", type=float, default=0.0, help="Weight for Far-FP penalty loss L_far (default: 0.0)")
-    g_far.add_argument("--far_threshold", type=float, default=20.0, help="Distance threshold in voxels for L_far (default: 20.0)")
-    g_far.add_argument(
-        "--far_mode",
-        type=str,
-        default="fraction",
-        choices=["fraction", "bce", "focal", "combined"],
-        help="Penalty mode for FarFPLoss (default: fraction)",
-    )
-    g_far.add_argument("--far_ref_size", type=float, default=1000.0, help="Reference organ size in voxels for FarFPLoss")
-    g_far.add_argument(
-        "--far_penalty_absent",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Penalize predictions on slices where organ is absent in FarFPLoss",
-    )
-    g_far.add_argument(
-        "--fp_by_pred_class",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Group background FP errors by predicted organ class (default: False)",
-    )
-    g_far.add_argument(
-        "--fp_exclude_boundary",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Exclude r<=2 boundary transition band from background FP error set (default: False)",
-    )
-    g_far.add_argument(
-        "--empty_slice_suppression",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable Top-K empty-slice focal suppression for absent organs (default: False)",
-    )
-    g_far.add_argument("--empty_slice_topk", type=int, default=64, help="Top-K pixels per absent (slice, organ) pair")
-    g_far.add_argument("--empty_slice_prob_thresh", type=float, default=0.05, help="Probability threshold tau_p on absent slices")
-    g_far.add_argument("--empty_slice_focal_gamma", type=float, default=2.0, help="Focal exponent gamma for empty-slice suppression")
-    g_far.add_argument("--empty_slice_weight", type=float, default=1.0, help="Relative weight of L_EmptySlice inside L_E")
-
-    # -------------------------------------------------------------------------
-    # [9] Checkpoints, Output Directories, Drive Sync & Evaluation
-    # -------------------------------------------------------------------------
-    g_io = parser.add_argument_group("[9] Checkpoints, Output Directories, Drive Sync & Evaluation")
+    g_io = parser.add_argument_group("[8] Checkpoints, Output Directories, Drive Sync & Evaluation")
     g_io.add_argument("--teacher_ckpt", type=str, default="teacher_weights/epoch_299.pth", help="Teacher LoRA/model checkpoint")
     g_io.add_argument(
         "--teacher_base_ckpt",
@@ -719,13 +655,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Checkpoint path to resume training from, or 'auto' (latest local/Drive checkpoint, else fresh start)",
     )
-    g_io.add_argument("--output_dir", type=str, default="runs/cba_v2", help="Local output directory for train/eval mode")
-    g_io.add_argument("--runs_dir", type=str, default="runs/main", help="Local runs root directory for reproduce/tune mode")
+    g_io.add_argument("--output_dir", type=str, default="runs/ours", help="Local output directory for train/eval mode")
+    g_io.add_argument("--runs_dir", type=str, default="runs/main", help="Local runs root directory for reproduce mode")
     g_io.add_argument(
         "--drive_dir",
         type=str,
         default=None,
-        help="Google Drive root folder for reproduce/tune mode, e.g. /content/drive/MyDrive/IAD/main",
+        help="Google Drive root folder for reproduce mode, e.g. /content/drive/MyDrive/IAD/main",
     )
     g_io.add_argument(
         "--drive_sync_dir",
@@ -756,38 +692,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save 3D/2D prediction arrays from the final evaluation (--no-save_final_preds to disable)",
     )
 
-    # -------------------------------------------------------------------------
-    # [10] Hyperparameter Tuning & Code Packaging
-    # -------------------------------------------------------------------------
-    g_aux = parser.add_argument_group("[10] Hyperparameter Tuning & Code Packaging")
-    g_aux.add_argument(
-        "--tune_action",
-        type=str,
-        default="run",
-        choices=["plan", "run", "score"],
-        help="Action for '--mode tune': 'plan' (cost estimate), 'run' (execute stage), or 'score' (select params)",
-    )
-    g_aux.add_argument(
-        "--tune_stage",
-        type=str,
-        default="A",
-        choices=["warmup", "ref", "A", "B", "C"],
-        help="Tuning stage for '--mode tune' (default: A)",
-    )
-    g_aux.add_argument("--tune_L", type=int, default=60, help="Schedule length L in epochs for '--mode tune' (default: 60)")
-    g_aux.add_argument(
-        "--bundle",
-        type=str,
-        default="cba_v2",
-        choices=["cba_v2", "cba_v2_arm5", "ours_curriculum", "ours_300ep", "cba_pilot"],
-        help="Bundle target for '--mode package' (default: cba_v2)",
-    )
-    g_aux.add_argument(
-        "--regen_notebooks",
-        action="store_true",
-        help="Regenerate Colab notebooks before packaging in '--mode package'",
-    )
-
     return parser
 
 
@@ -815,13 +719,12 @@ _REPRODUCE_CONTROL_DESTS = {
     "state_json", "lambda_ratio_cap",
     "lambda_a", "tau", "m", "r", "beta",
     "ckpt", "eval_role", "eval_output",
-    "tune_action", "tune_stage", "tune_L", "bundle", "regen_notebooks",
 }
 
 
 def _build_extra_reproduce_train_args(args: argparse.Namespace, explicit_dests: set) -> List[str]:
     """Collect explicitly provided train.py flags not already managed by main_common.py."""
-    from experiments.cba_v2.train import build_parser as build_train_parser
+    from scripts.train import build_parser as build_train_parser
 
     train_parser = build_train_parser()
     extra: List[str] = []
@@ -874,18 +777,17 @@ def _aggregate_seed_summaries(seed_results: List[Dict[str, Any]]) -> Dict[str, A
 
 
 def run_train_mode(args: argparse.Namespace, raw_argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
-    """Execute direct training (single or multi-seed, single or multi-dataset) via experiments/cba_v2/train.py."""
-    import run_tuning as rt
+    """Execute direct training (single or multi-seed, single or multi-dataset) via scripts/train.py."""
+    import main_common as mc
 
     raw_tokens = list(raw_argv) if raw_argv is not None else []
     arm_name = resolve_effective_arm(args, raw_tokens)
     datasets = parse_datasets(args.dataset)
     seeds = parse_seeds(args.seed, args.seeds)
 
-    # Optionally load tuned state parameters if --state_json was provided and not explicitly overridden on CLI
     if args.state_json:
-        state = rt.load_state(args.state_json)
-        for key, flag in rt.STATE_TO_FLAG.items():
+        state = mc.load_state(args.state_json)
+        for key, flag in mc.STATE_TO_FLAG.items():
             if not any(t == flag or t.startswith(f"{flag}=") for t in raw_tokens):
                 if key in state:
                     setattr(args, key, state[key])
@@ -1084,7 +986,7 @@ def run_reproduce_mode(args: argparse.Namespace, raw_argv: Optional[Sequence[str
 
 def run_eval_mode(args: argparse.Namespace, raw_argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """Run standalone evaluation of a Student or Teacher checkpoint on Synapse, ACDC, or Polyp."""
-    from experiments.cba_v2.train import resolve_file
+    from scripts.train import resolve_file
 
     raw_tokens = list(raw_argv) if raw_argv is not None else []
     explicit_dests = _explicit_cli_dests(build_parser(), raw_tokens)
@@ -1230,61 +1132,6 @@ def run_eval_mode(args: argparse.Namespace, raw_argv: Optional[Sequence[str]] = 
     }
 
 
-def run_tune_mode(args: argparse.Namespace) -> Dict[str, Any]:
-    """Dispatch hyperparameter tuning commands to scripts/run_tuning.py."""
-    import run_tuning as rt
-
-    action = args.tune_action
-    if action == "plan":
-        cost = rt.plan_cost(epoch_sec=100.0, eval_sec=60.0, L=args.tune_L)
-        print(json.dumps(cost, indent=2), flush=True)
-        return {"mode": "tune", "action": "plan", "cost": cost}
-
-    tune_argv: List[str] = [
-        action,
-        "--stage", str(args.tune_stage),
-        "--L", str(args.tune_L),
-        "--runs_dir", str(args.runs_dir),
-    ]
-    if args.drive_dir:
-        tune_argv += ["--drive_dir", str(args.drive_dir)]
-    if args.state_json:
-        tune_argv += ["--state_json", str(args.state_json)]
-    if action == "run" and args.dry_run:
-        tune_argv.append("--dry_run")
-    out = rt.main(tune_argv)
-    return {"mode": "tune", "action": action, "stage": args.tune_stage, "argv": tune_argv, "out": out}
-
-
-def run_package_mode(args: argparse.Namespace) -> Dict[str, Any]:
-    """Package self-contained Colab bundle (and optionally regenerate notebooks)."""
-    import zip_code
-
-    if args.dry_run:
-        print(f"[dry_run:package] bundle={args.bundle} regen_notebooks={args.regen_notebooks}", flush=True)
-        return {"mode": "package", "dry_run": True, "bundle": args.bundle, "regen_notebooks": bool(args.regen_notebooks)}
-
-    if args.regen_notebooks:
-        import make_main_notebook
-        import prepare_5methods_notebooks
-        import prepare_acdc_polyp_3notebooks
-
-        make_main_notebook.main()
-        prepare_5methods_notebooks.main()
-        prepare_acdc_polyp_3notebooks.main()
-
-    bundle_map = {
-        "cba_v2": ("iad_cba_v2_code.zip", zip_code.CBA_V2_TARGETS, "run_cba_v2_colab.ipynb"),
-        "cba_v2_arm5": ("iad_cba_v2_arm5_code.zip", zip_code.CBA_V2_ARM5_TARGETS, "run_cba_v2_arm5_colab.ipynb"),
-        "ours_curriculum": ("iad_ours_curriculum_code.zip", zip_code.OURS_CURRICULUM_TARGETS, "run_ours_curriculum_colab.ipynb"),
-        "ours_300ep": ("iad_ours_300ep_code.zip", zip_code.OURS_300EP_TARGETS, "run_ours_300ep_colab.ipynb"),
-        "cba_pilot": ("iad_cba_pilot_code.zip", zip_code.CBA_PILOT_TARGETS, "run_cba_pilot_colab.ipynb"),
-    }
-    zip_name, targets, nb_name = bundle_map[args.bundle]
-    out_zip = zip_code.build_bundle(zip_name=zip_name, targets=targets, notebook_name=nb_name)
-    return {"mode": "package", "bundle": args.bundle, "output_zip": str(out_zip)}
-
-
 def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
@@ -1305,10 +1152,6 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         return run_reproduce_mode(args, raw_argv)
     if mode == "eval":
         return run_eval_mode(args, raw_argv)
-    if mode == "tune":
-        return run_tune_mode(args)
-    if mode == "package":
-        return run_package_mode(args)
     raise ValueError(f"Unsupported mode: {mode!r}")
 
 
